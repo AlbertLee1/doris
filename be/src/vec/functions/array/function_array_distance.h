@@ -109,6 +109,62 @@ public:
     // We want to make sure throw exception if input columns contain NULL.
     bool use_default_implementation_for_nulls() const override { return false; }
 
+private:
+    // Helper function to extract numeric data as float array
+    template <typename T>
+    static void extract_to_float(const IColumn* col, size_t start, size_t size, std::vector<float>& output) {
+        const auto* numeric_col = assert_cast<const ColumnVector<T>*>(col);
+        const auto& data = numeric_col->get_data();
+        output.resize(size);
+        for (size_t i = 0; i < size; ++i) {
+            output[i] = static_cast<float>(data[start + i]);
+        }
+    }
+
+    // Extract array data to float vector based on column type
+    static void extract_array_data(const ColumnArray* arr, size_t start, size_t size,
+                                   std::vector<float>& output, const std::string& func_name) {
+        const IColumn* data_col = arr->get_data_ptr().get();
+
+        // Handle nullable data column
+        if (data_col->is_nullable()) {
+            if (data_col->has_null()) {
+                throw doris::Exception(ErrorCode::INVALID_ARGUMENT,
+                                     "Argument for function {} cannot have null elements", func_name);
+            }
+            auto nullable_col = assert_cast<const ColumnNullable*>(data_col);
+            data_col = nullable_col->get_nested_column_ptr().get();
+        }
+
+        // Extract based on actual data type
+        PrimitiveType type = data_col->get_primitive_type();
+        switch (type) {
+            case TYPE_FLOAT:
+                extract_to_float<TYPE_FLOAT>(data_col, start, size, output);
+                break;
+            case TYPE_DOUBLE:
+                extract_to_float<TYPE_DOUBLE>(data_col, start, size, output);
+                break;
+            case TYPE_TINYINT:
+                extract_to_float<TYPE_TINYINT>(data_col, start, size, output);
+                break;
+            case TYPE_SMALLINT:
+                extract_to_float<TYPE_SMALLINT>(data_col, start, size, output);
+                break;
+            case TYPE_INT:
+                extract_to_float<TYPE_INT>(data_col, start, size, output);
+                break;
+            case TYPE_BIGINT:
+                extract_to_float<TYPE_BIGINT>(data_col, start, size, output);
+                break;
+            default:
+                throw doris::Exception(ErrorCode::INVALID_ARGUMENT,
+                                     "Unsupported array element type for function {}: {}",
+                                     func_name, type);
+        }
+    }
+
+public:
     Status execute_impl(FunctionContext* context, Block& block, const ColumnNumbers& arguments,
                         uint32_t result, size_t input_rows_count) const override {
         const auto& arg1 = block.get_by_position(arguments[0]);
@@ -148,47 +204,22 @@ public:
             arr2 = assert_cast<const ColumnArray*>(col2.get());
         }
 
-        const ColumnFloat32* float1 = nullptr;
-        const ColumnFloat32* float2 = nullptr;
-        if (arr1->get_data_ptr()->is_nullable()) {
-            if (arr1->get_data_ptr()->has_null()) {
-                throw doris::Exception(ErrorCode::INVALID_ARGUMENT,
-                                       "First argument for function {} cannot have null",
-                                       get_name());
-            }
-            auto nullable1 = assert_cast<const ColumnNullable*>(arr1->get_data_ptr().get());
-            float1 = assert_cast<const ColumnFloat32*>(nullable1->get_nested_column_ptr().get());
-        } else {
-            float1 = assert_cast<const ColumnFloat32*>(arr1->get_data_ptr().get());
-        }
-
-        if (arr2->get_data_ptr()->is_nullable()) {
-            if (arr2->get_data_ptr()->has_null()) {
-                throw doris::Exception(ErrorCode::INVALID_ARGUMENT,
-                                       "Second argument for function {} cannot have null",
-                                       get_name());
-            }
-            auto nullable2 = assert_cast<const ColumnNullable*>(arr2->get_data_ptr().get());
-            float2 = assert_cast<const ColumnFloat32*>(nullable2->get_nested_column_ptr().get());
-        } else {
-            float2 = assert_cast<const ColumnFloat32*>(arr2->get_data_ptr().get());
-        }
-
         const ColumnOffset64* offset1 =
                 assert_cast<const ColumnArray::ColumnOffsets*>(arr1->get_offsets_ptr().get());
         const ColumnOffset64* offset2 =
                 assert_cast<const ColumnArray::ColumnOffsets*>(arr2->get_offsets_ptr().get());
+
         // prepare return data
         auto dst = ColumnType::create(input_rows_count);
         auto& dst_data = dst->get_data();
 
+        // Temporary buffers for converting integer arrays to float
+        std::vector<float> float_buffer1;
+        std::vector<float> float_buffer2;
+
         size_t elemt_cnt = offset1->size();
         for (ssize_t row = 0; row < elemt_cnt; ++row) {
             // Calculate actual array sizes for current row.
-            // For nullable arrays, we cannot compare absolute offset values directly because:
-            // 1. When a row is null, its offset might equal the previous offset (no elements added)
-            // 2. Or it might include the array size even if the row is null (implementation dependent)
-            // Therefore, we must calculate the actual array size as: offsets[row] - offsets[row-1]
             ssize_t size1 = offset1->get_data()[row] - offset1->get_data()[row - 1];
             ssize_t size2 = offset2->get_data()[row] - offset2->get_data()[row - 1];
 
@@ -197,9 +228,16 @@ public:
                         "function {} have different input element sizes of array: {} and {}",
                         get_name(), size1, size2);
             }
-            dst_data[row] = DistanceImpl::distance(
-                    float1->get_data().data() + offset1->get_data()[row - 1],
-                    float2->get_data().data() + offset2->get_data()[row - 1], size1);
+
+            size_t start1 = offset1->get_data()[row - 1];
+            size_t start2 = offset2->get_data()[row - 1];
+
+            // Extract data to float arrays
+            extract_array_data(arr1, start1, size1, float_buffer1, get_name());
+            extract_array_data(arr2, start2, size2, float_buffer2, get_name());
+
+            // Calculate distance using float data
+            dst_data[row] = DistanceImpl::distance(float_buffer1.data(), float_buffer2.data(), size1);
         }
 
         block.replace_by_position(result, std::move(dst));

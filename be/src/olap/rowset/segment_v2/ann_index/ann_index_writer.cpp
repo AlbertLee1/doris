@@ -107,18 +107,84 @@ Status AnnIndexColumnWriter::add_array_values(size_t field_size, const void* val
         }
     }
 
-    const float* p = reinterpret_cast<const float*>(value_ptr);
-
+    // Convert input data to float based on field_size
     const size_t full_elements = CHUNK_SIZE * dim;
-    size_t remaining_elements = num_rows * dim;
-    size_t src_offset = 0;
-    while (remaining_elements > 0) {
-        size_t available_space = full_elements - _float_array.size();
-        size_t elements_to_add = std::min(remaining_elements, available_space);
+    size_t total_elements = num_rows * dim;
 
-        _float_array.insert(_float_array.end(), p + src_offset, p + src_offset + elements_to_add);
+    // Helper lambda to convert different numeric types to float
+    auto convert_to_float = [&](auto typed_ptr, size_t start, size_t count) {
+        for (size_t i = 0; i < count; ++i) {
+            _float_array.push_back(static_cast<float>(typed_ptr[start + i]));
+        }
+    };
+
+    size_t src_offset = 0;
+    while (src_offset < total_elements) {
+        size_t available_space = full_elements - _float_array.size();
+        size_t elements_to_add = std::min(total_elements - src_offset, available_space);
+
+        // Convert based on field_size (element type)
+        switch (field_size) {
+            case 1: { // int8 / tinyint
+                const auto* p = reinterpret_cast<const int8_t*>(value_ptr);
+                convert_to_float(p, src_offset, elements_to_add);
+                break;
+            }
+            case 2: { // int16 / smallint
+                const auto* p = reinterpret_cast<const int16_t*>(value_ptr);
+                convert_to_float(p, src_offset, elements_to_add);
+                break;
+            }
+            case 4: { // int32 / float
+                // Try to detect if it's float or int32
+                // For simplicity, check if the first value looks like a float
+                const auto* p_float = reinterpret_cast<const float*>(value_ptr);
+                const auto* p_int = reinterpret_cast<const int32_t*>(value_ptr);
+
+                // Use heuristic: if value is in typical float range and has fractional part
+                bool is_float = false;
+                if (elements_to_add > 0) {
+                    float first_val = p_float[src_offset];
+                    // Check if it's a valid float (not NaN, not Inf, or has fractional part)
+                    is_float = !std::isnan(first_val) && !std::isinf(first_val) &&
+                               (first_val != static_cast<float>(static_cast<int32_t>(first_val)));
+                }
+
+                if (is_float) {
+                    for (size_t i = 0; i < elements_to_add; ++i) {
+                        _float_array.push_back(p_float[src_offset + i]);
+                    }
+                } else {
+                    convert_to_float(p_int, src_offset, elements_to_add);
+                }
+                break;
+            }
+            case 8: { // int64 / bigint / double
+                const auto* p_double = reinterpret_cast<const double*>(value_ptr);
+                const auto* p_int64 = reinterpret_cast<const int64_t*>(value_ptr);
+
+                // Similar heuristic for double vs int64
+                bool is_double = false;
+                if (elements_to_add > 0) {
+                    double first_val = p_double[src_offset];
+                    is_double = !std::isnan(first_val) && !std::isinf(first_val) &&
+                                (first_val != static_cast<double>(static_cast<int64_t>(first_val)));
+                }
+
+                if (is_double) {
+                    for (size_t i = 0; i < elements_to_add; ++i) {
+                        _float_array.push_back(static_cast<float>(p_double[src_offset + i]));
+                    }
+                } else {
+                    convert_to_float(p_int64, src_offset, elements_to_add);
+                }
+                break;
+            }
+            default:
+                return Status::InvalidArgument("Unsupported field size {} for ANN index.", field_size);
+        }
+
         src_offset += elements_to_add;
-        remaining_elements -= elements_to_add;
 
         if (_float_array.size() == full_elements) {
             RETURN_IF_ERROR(_vector_index->train(CHUNK_SIZE, _float_array.data()));

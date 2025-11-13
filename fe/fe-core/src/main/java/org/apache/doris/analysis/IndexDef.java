@@ -252,8 +252,8 @@ public class IndexDef {
             }
             Type columnType = column.getType();
             Type itemType = ((ArrayType) columnType).getItemType();
-            if (!itemType.isFloatingPointType()) {
-                throw new AnalysisException("ANN index column item type must be float type");
+            if (!itemType.isFloatingPointType() && !itemType.isFixedPointType()) {
+                throw new AnalysisException("ANN index column item type must be float or integer type");
             }
             if (keysType != KeysType.DUP_KEYS) {
                 throw new AnalysisException("ANN index can only be used in DUP_KEYS table");

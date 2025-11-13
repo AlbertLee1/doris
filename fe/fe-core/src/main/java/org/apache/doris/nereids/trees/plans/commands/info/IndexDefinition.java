@@ -149,8 +149,8 @@ public class IndexDefinition {
                 throw new AnalysisException("ANN index column must be array type, invalid index: " + name);
             }
             DataType itemType = ((ArrayType) colType).getItemType();
-            if (!itemType.isFloatType()) {
-                throw new AnalysisException("ANN index column item type must be float type, invalid index: " + name);
+            if (!itemType.isFloatType() && !itemType.isIntegralType()) {
+                throw new AnalysisException("ANN index column item type must be float or integer type, invalid index: " + name);
             }
             if (keysType != KeysType.DUP_KEYS) {
                 throw new AnalysisException("ANN index can only be used in DUP_KEYS table");
